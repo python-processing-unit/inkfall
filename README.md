@@ -108,3 +108,8 @@ uv run python tools/entry.py          # exercise the console entry point
 Screenshots land in `tools/_shot_*.png`. `tools/_sandbox_libs` holds a staged
 copy of the wheels used for headless testing in a sandbox without `uv`; it is
 not needed to play the game.
+
+
+## Note
+
+This game was generated autonomously by an agent with only two human interactions. Not bad for $0.62.
