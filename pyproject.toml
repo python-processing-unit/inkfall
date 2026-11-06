@@ -1,0 +1,23 @@
+[project]
+name = "inkfall"
+version = "1.0.0"
+description = "INKFALL: a small, strange arcade game about being wet in a dry world"
+readme = "README.md"
+authors = [
+    { name = "Python Processor Unit" }
+]
+requires-python = ">=3.15.2"
+dependencies = [
+    "numpy>=2.5.4",
+    "pygame-ce>=2.5.8",
+]
+
+[project.scripts]
+inkfall = "inkfall:main"
+
+[build-system]
+requires = ["uv_build>=0.13.6,<0.14.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "inkfall"
