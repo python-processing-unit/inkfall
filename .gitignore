@@ -1,0 +1,14 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Headless-test staging and generated screenshots
+tools/_sandbox_libs/
+tools/_shot_*.png
