@@ -12,6 +12,8 @@ class Audio:
     def __init__(self) -> None:
         self.ok = False
         self.sounds: dict[str, pygame.mixer.Sound] = {}
+        # set by the game once the music exists; the music dips under effects
+        self.ducker = None
         try:
             if pygame.mixer.get_init() is None:
                 pygame.mixer.init(frequency=44100, size=-16, channels=1, buffer=512)
@@ -110,3 +112,7 @@ class Audio:
             snd.play()
         except pygame.error:
             pass
+        # Duck the music by an amount that follows how loud the effect is, so a
+        # full-volume hit clears more room than a quiet ambient blip.
+        if self.ducker is not None:
+            self.ducker.duck(volume)

@@ -10,6 +10,7 @@ from pygame import Vector2
 
 from . import config as C
 from .audio import Audio
+from .music import Music
 from .config import clamp, lerp_color
 from .draw import aa_circle, aa_polygon, add_glow, blob_points, make_paper
 from .entities import Blot, Boss, Drop, FloatText, Orb, Particles, Puddle, Quill, Ring, Skitter, Sponge, Squid, norm
@@ -38,6 +39,8 @@ class Game:
         self.paper = make_paper(C.WIDTH, C.HEIGHT)
         self.overlay = pygame.Surface((C.WIDTH, C.HEIGHT), pygame.SRCALPHA)
         self.audio = Audio()
+        self.music = Music(self.audio)
+        self.audio.ducker = self.music
         self.font_small = load_font(15)
         self.font = load_font(19)
         self.font_mid = load_font(30)
@@ -215,8 +218,28 @@ class Game:
     # ------------------------------------------------------------------
     # main update
     # ------------------------------------------------------------------
+    def _sync_music(self) -> None:
+        """Pick a loop from the current state, and stop it when frozen."""
+        if not self.music.ok:
+            return
+        if self.state in (Game.STATE_PAUSE, Game.STATE_HELP):
+            self.music.pause()
+            return
+        self.music.resume()
+        if self.state == Game.STATE_OVER:
+            self.music.set("calm", gain=0.55)
+        elif self.boss_active:
+            self.music.set("boss", gain=0.9)
+        elif self.state == Game.STATE_PLAY:
+            busy = len(self.enemies) + len(self.spawn_queue)
+            self.music.set("combat" if busy > 3 else "calm", gain=0.75)
+        else:
+            self.music.set("calm", gain=0.8)
+
     def update(self, dt: float) -> None:
         self.state_time += dt
+        self._sync_music()
+        self.music.update(dt)
 
         if self.state == Game.STATE_TITLE:
             self.ambient += dt
@@ -393,6 +416,7 @@ class Game:
                 self.audio.play("ui", 0.4)
             elif event.key == pygame.K_m:
                 self.audio.ok = not self.audio.ok
+                self.music.muted = not self.audio.ok
 
         if event.type == pygame.MOUSEBUTTONDOWN and self.state == Game.STATE_PLAY:
             if event.button == 3:
@@ -587,7 +611,7 @@ class Game:
             [
                 "WASD move    MOUSE aim    LEFT throw ink    RIGHT heavy dollop",
                 "SHIFT dash (costs ink)    walk over your puddles to drink them back",
-                "H how to play    ESC pause / quit    M mute",
+                "H how to play    ESC pause / quit    M mute everything",
             ]
         ):
             img = self.font_small.render(line, True, C.INK_SOFT)
