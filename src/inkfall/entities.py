@@ -128,6 +128,16 @@ class Drop:
             self.dead = True
             self.splat(game)
         elif not (-50 < self.pos.x < C.WIDTH + 50 and -50 < self.pos.y < C.HEIGHT + 50):
+            # Intentional, not a missing splat() call. A droplet that leaves
+            # the page is gone and leaves nothing behind, so ink fired into a
+            # wall is spent and cannot be reclaimed. That is the scarcity the
+            # rest of the design assumes: shooting wildly at the boundary
+            # should cost you, exactly as the README's "shoot only what you
+            # must, then drink the mess you made" loop implies.
+            #
+            # The 50px margin is part of it too, not an off-by-something: it
+            # is the point past which the droplet is clearly off the page and
+            # not merely touching the frame.
             self.dead = True
 
     def splat(self, game) -> None:
