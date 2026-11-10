@@ -10,7 +10,7 @@ from pygame import Vector2
 
 from . import config as C
 from .config import clamp, lerp_color
-from .draw import aa_circle, aa_polygon, add_glow, blob_points
+from .draw import aa_circle, aa_polygon, add_glow, blob_points, shade_blob
 
 
 def norm(v: Vector2) -> Vector2:
@@ -99,7 +99,7 @@ class Particles:
 class Drop:
     """A droplet in flight. Friendly drops stain the paper when they land."""
 
-    def __init__(self, pos, vel, radius, damage, friendly=True, life=1.4, heavy=False, color=C.INK):
+    def __init__(self, pos, vel, radius, damage, friendly=True, life=1.4, heavy=False, color=C.INK, stains=None):
         self.pos = Vector2(pos)
         self.vel = Vector2(vel)
         self.radius = radius
@@ -108,6 +108,10 @@ class Drop:
         self.life = life
         self.heavy = heavy
         self.color = color
+        # A friendly droplet always stains. A hostile one only does if the
+        # firer wants its ink back, which is how the boss plays by the same
+        # rules as the player.
+        self.stains = friendly if stains is None else stains
         self.dead = False
         self.phase = random.uniform(0, 6.28)
         self.trail = 0.0
@@ -141,8 +145,13 @@ class Drop:
             self.dead = True
 
     def splat(self, game) -> None:
-        if self.friendly:
-            game.add_puddle(self.pos, self.radius * (2.4 if self.heavy else 1.7), 0.026 if not self.heavy else 0.09)
+        if self.stains:
+            game.add_puddle(
+                self.pos,
+                self.radius * (2.4 if self.heavy else 1.7),
+                0.026 if not self.heavy else 0.09,
+                self.color,
+            )
         game.particles.burst(
             self.pos,
             7 if not self.heavy else 18,
@@ -734,69 +743,569 @@ class Squid(Enemy):
             pygame.draw.circle(surf, C.INK, (int(ex), int(ey)), max(1, int(r * 0.08)))
 
 
+class Arm:
+    """One of the eight tentacles.
+
+    Slow-drifting, open to fire whenever the head is closed, and it shoots at
+    the player on its own clock like a Quill. Killing one is the only way to
+    get at the head, so the arms are the puzzle and the head is the reward.
+    """
+
+    __slots__ = (
+        "boss", "index", "base_angle", "phase", "drift_speed", "amp",
+        "length", "hp", "max_hp", "alive", "fire_cd", "hit_flash",
+        "seed", "recoil", "charging", "curl_dir",
+    )
+
+    def __init__(self, boss, index: int) -> None:
+        self.boss = boss
+        self.index = index
+        self.base_angle = (
+            math.tau * index / boss.ARM_COUNT + random.uniform(-0.16, 0.16)
+        )
+        self.phase = random.uniform(0, math.tau)
+        self.drift_speed = random.uniform(0.30, 0.55)
+        self.amp = random.uniform(0.16, 0.28)
+        self.length = random.uniform(130.0, 200.0)
+        self.hp = boss.ARM_HP
+        self.max_hp = boss.ARM_HP
+        self.alive = True
+        # staggered so eight arms do not volley together
+        self.fire_cd = random.uniform(0.9, boss.FIRE_BASE)
+        self.hit_flash = 0.0
+        self.seed = random.uniform(0, 40)
+        self.recoil = 0.0
+        self.charging = 0.0
+        self.curl_dir = random.choice((-1.0, 1.0))
+
+    @property
+    def angle(self) -> float:
+        return self.base_angle + math.sin(self.phase) * self.amp
+
+    def tip(self) -> Vector2:
+        a = self.angle
+        d = self.boss.effective_radius + self.length
+        return self.boss.pos + Vector2(math.cos(a), math.sin(a)) * d
+
+    def points(self, segments: int = 14):
+        """Tapering curve from the body to the tip, for drawing and aiming.
+
+        A single gentle S so the arm reads as a limb rather than a spoke, with
+        the bend easing to zero at the root so it stays attached to the body.
+        """
+        a = self.angle
+        near = self.boss.effective_radius * 0.30
+        far = self.boss.effective_radius + self.length
+        perp = Vector2(-math.sin(a), math.cos(a))
+        out = []
+        for k in range(segments + 1):
+            t = k / segments
+            d = near + (far - near) * t
+            # Two independent bends, one swimming through the length and one
+            # curling steadily away, so each arm trails rather than points.
+            wave = math.sin(t * 2.2 + self.phase * 1.5 + self.seed * 0.1) * self.length * 0.11
+            # Curl only near the tip, and never enough to bring the arm back
+            # inside the mantle, which drew limbs across the face.
+            curl = (t ** 3.0) * self.length * 0.16 * self.curl_dir
+            bend = (wave + curl) * min(1.0, t * 1.6)
+            out.append(self.boss.pos + Vector2(math.cos(a), math.sin(a)) * d + perp * bend)
+        return out
+
+    def tip_zone(self, segments: int = 14):
+        """The last fifth of the arm, which is the only part that can be hurt.
+
+        Returns the tail of the same curve that is drawn, so the hitbox and the
+        artwork cannot drift apart. The arm above this point is a decoy: shots
+        that land there pass through without doing anything.
+        """
+        pts = self.points(segments)
+        return pts[int(len(pts) * 0.8):]
+
+
 class Boss(Enemy):
-    """THE BLOT: a whole spilled well, wearing a bad mood."""
+    """OCTOPUS: eight arms, one head, and a lock that only opens from outside.
+
+    The head is armoured and cannot be hurt. The arms are the only lever, and
+    only their tips are vulnerable: the last fifth of each arm can be shot, and
+    anything that lands further up the limb passes straight through. That makes
+    the arms a moving target rather than a wall, because the player has to hit
+    the whip end while it sweeps.
+
+    Sever an arm and the head opens, and stays open until the player lands
+    exactly one increment of damage, one eighth of the head. It then re-armours,
+    pauses, and comes back angrier: faster firing, darker, more ragged. Eight
+    arms and eight increments, so every arm is worth exactly one step and the
+    fight ends when the last one is spent.
+
+    Arms never grow back. There is no softlock from that: the head stays open
+    until its increment is paid, so the player can never run out of levers with
+    a closed head. Nothing here heals, and the body darkens toward ink as the
+    fight goes on, ending the same colour every other corpse does.
+    """
 
     kind = "boss"
-    hp = 70.0
-    speed = 36.0
-    radius = 56.0
-    damage = 0.18
-    score = 1200
-    ink_reward = 0.45
-    drink_rate = 1.6
-    body = (64, 54, 92)
+    ARM_COUNT = 8
+    # Each arm is a permanent resource that never returns, and a hit requires
+    # catching a moving tip zone rather than any point of a wide disc. Raised
+    # from 6.0 because a competent player was stripping arms faster than the
+    # patience ramp below ever had time to matter.
+    ARM_HP = 8.0
+    HEAD_HP = 28.0
+
+    # One arm per checkpoint. Severing an arm opens the head for exactly one
+    # increment, so eight arms is eight steps and the pool is spent on the last.
+    CHECKPOINTS = 8
+
+    # Only the last fifth of the arm can be hit. Everything above it is a
+    # decoy that drops absorb without effect.
+    TIP_FRACTION = 0.2
+    ARM_HIT_RADIUS = 15.0
+    ARM_WIDTH = 15.0        # widest part of a limb, at the root
+    TIP_INK = 0.070         # ink left by a tip hit, which must fund the fight
+    STAGGER = 2.4           # pause after each step, before the arms resume
+    FIRE_BASE = 6.0         # arm fire cooldown at full health
+    # Per checkpoint. Halved from 0.13 when the count went from 4 to 8, so the
+    # run of eight reaches a similar final rate instead of pinning at the
+    # 0.85s floor by the sixth step and then escalating no further.
+    FIRE_STEP = 0.055
+
+    # Impatience. The longer the player goes without taking an arm, the faster
+    # the surviving arms fire, so stalling is punished and the fight keeps
+    # moving. Reset to zero by every sever, so the ramp is about pressure
+    # between successes rather than about total fight length.
+    #
+    # The ramp keeps climbing rather than saturating, because the request is
+    # that it tracks how long it has been since the last kill. It is curved
+    # (0.6 power) so the opening seconds recover quickly after a sever, and it
+    # is capped by FIRE_FLOOR so it can never become an unwinnable wall.
+    PATIENCE = 10.0         # seconds of quiet per unit of the ramp
+    PATIENCE_FIRE = 0.80    # fraction of cooldown removed per unit of ramp
+    FIRE_FLOOR = 2.2        # shortest possible cooldown, however impatient
+
+    damage = 0.09
+    radius = 50.0
+    speed = 96.0
+    score = 2200
+    ink_reward = 0.55
+    drink_rate = 0.0        # deliberately no healing
 
     def __init__(self, pos, wave=1):
         super().__init__(pos, wave)
-        self.max_hp *= 0.55
-        self.hp = self.max_hp
-        self.slam_cd = 2.4
-        self.spawn_cd = 6.0
-        self.burst_cd = 4.0
-        self.tell = 0.0
+        self.head_max = self.HEAD_HP * (1.0 + 0.05 * (wave - 1))
+        self.head_hp = self.head_max
+        self.hp = self.head_hp
+        self.max_hp = self.head_max
+        self.phase_n = 0
+        self.armored = True
+        self.stagger = 0.0
+        self.spin = 0.0
+        self.wince = 0.0
+        self.arms = [Arm(self, i) for i in range(self.ARM_COUNT)]
+        self.severed = 0
+        # Damage banked during the current open window, toward one increment.
+        self.open_damage = 0.0
+        # Seconds since the player last took an arm. Drives the fire ramp.
+        self.since_sever = 0.0
+
+    # ------------------------------------------------------------------
+    @property
+    def effective_radius(self) -> float:
+        return self.radius * (0.55 + 0.45 * self.spawn_anim)
+
+    @property
+    def reach(self) -> float:
+        """How far the animal actually extends, for clamping and hit tests.
+
+        Measured from the drawn curve rather than from the arm's nominal
+        length: the sideways bend and the arm's own thickness both add to the
+        footprint, and using the nominal length let the outsides of the limbs
+        draw past the page edge.
+        """
+        span = self.effective_radius
+        for arm in self.arms:
+            if not arm.alive:
+                continue
+            span = max(span, max((q - self.pos).length() for q in arm.points()))
+        return span + self.ARM_WIDTH * 0.5
+
+    @property
+    def open(self) -> bool:
+        """True while the head is waiting for its one increment of damage.
+
+        There is no timer. The head stays open until the player lands a hit,
+        which is what guarantees the fight can always be finished: a severed
+        arm can never be wasted by being too slow.
+        """
+        return not self.armored
+
+    @property
+    def arm_count(self) -> int:
+        return sum(1 for a in self.arms if a.alive)
+
+    def _step(self) -> float:
+        return self.head_max / self.CHECKPOINTS
+
+    @property
+    def impatience(self) -> float:
+        """How long it has been since an arm was taken, in ramps.
+
+        0 immediately after a sever and growing without a hard ceiling; the
+        cooldown floor in think() is what finally bounds it.
+        """
+        return max(0.0, self.since_sever / max(1e-6, self.PATIENCE))
 
     def steering(self, game, dt):
-        return norm(game.player.pos - self.pos)
+        """Follows you at a distance, which is what lets you bait it.
+
+        It is fast enough to keep up but not to catch you, so a player can lead
+        it to one side of the page and double back to drink the spill it left
+        behind. If it just sat on its own ink there would be no way to reclaim
+        anything.
+        """
+        to = game.player.pos - self.pos
+        d = max(1.0, to.length())
+        radial = to / d
+        # Keep the whole animal on the page. The reach is the mantle plus the
+        # longest arm, so it never draws half off-screen or under the HUD.
+        pad = self.reach + 8.0
+        off = Vector2()
+        if self.pos.x < pad:
+            off.x += (pad - self.pos.x) / pad
+        elif self.pos.x > C.WIDTH - pad:
+            off.x -= (self.pos.x - (C.WIDTH - pad)) / pad
+        if self.pos.y < pad:
+            off.y += (pad - self.pos.y) / pad
+        elif self.pos.y > C.HEIGHT - pad:
+            off.y -= (self.pos.y - (C.HEIGHT - pad)) / pad
+        if off.length_squared() > 0.02:
+            return norm(off) * 1.4
+        if d > 250:
+            return radial
+        if d < 150:
+            return -radial * 0.8
+        # Otherwise circle, which keeps it moving rather than parked.
+        tangent = Vector2(-radial.y, radial.x) * (1.0 if self.phase_n % 2 == 0 else -1.0)
+        return tangent * 0.55
 
     def think(self, dt, game):
-        self.slam_cd -= dt
-        self.spawn_cd -= dt
-        self.burst_cd -= dt
-        self.tell = max(0.0, self.tell - dt)
+        self.spin += dt * 0.5
+        self.wince = max(0.0, self.wince - dt * 2.0)
+        self.since_sever += dt
 
-        if self.slam_cd <= 0:
-            self.slam_cd = random.uniform(2.0, 3.4)
-            self.tell = 1.0
-            game.ring(self.pos, self.effective_radius * 4.2, C.VERMILION, 0.5, 3)
-            if (game.player.pos - self.pos).length() < self.effective_radius * 2.6:
-                game.player.hurt(0.16, game, norm(game.player.pos - self.pos) * 420)
-                game.audio.play("hurt", 0.7)
+        if self.stagger > 0:
+            self.stagger -= dt
+            if self.stagger <= 0:
+                self.stagger = 0.0
+                # Do not re-armour here. A player who severs another arm during
+                # the pause opens the head again, and closing it on the stagger
+                # timer threw that window away without paying for it, so an arm
+                # could be spent for nothing and the boss could stall with arms
+                # still to give. Only paying an increment closes the head.
 
-        if self.burst_cd <= 0:
-            self.burst_cd = random.uniform(3.0, 4.6)
-            n = 12
-            for i in range(n):
-                a = math.tau * i / n + self.phase
-                game.add_drop(Drop(self.pos, Vector2(math.cos(a), math.sin(a)) * 210, 5.0, 0.05, False, 2.4))
+        can_fire = self.armored and self.stagger <= 0 and not self.open
 
-        if self.spawn_cd <= 0:
-            self.spawn_cd = random.uniform(5.0, 8.0)
-            for _ in range(2):
-                a = random.uniform(0, math.tau)
-                game.add_enemy(Skitter(self.pos + Vector2(math.cos(a), math.sin(a)) * 70, self.wave))
+        for arm in self.arms:
+            if not arm.alive:
+                # Arms are gone for good. Nothing regrows.
+                continue
+            arm.phase += dt * arm.drift_speed
+            arm.hit_flash = max(0.0, arm.hit_flash - dt * 5.0)
+            arm.recoil = max(0.0, arm.recoil - dt * 5.0)
+            if can_fire:
+                arm.fire_cd -= dt
+                arm.charging = 1.0 if arm.fire_cd < 0.5 else 0.0
+                if arm.fire_cd <= 0:
+                    self._arm_fire(arm, game)
+                    base = self.FIRE_BASE * (1.0 - self.FIRE_STEP * self.phase_n)
+                    # Impatience shortens the cooldown, so a player who stops
+                    # taking arms faces steadily more shots, with no plateau.
+                    # The 0.6 power keeps the first seconds after a sever close
+                    # to calm, and FIRE_FLOOR keeps it survivable.
+                    base /= 1.0 + self.PATIENCE_FIRE * (self.impatience ** 0.6)
+                    arm.fire_cd = max(self.FIRE_FLOOR, base * random.uniform(0.78, 1.25))
+                    arm.charging = 0.0
+            else:
+                arm.charging = 0.0
 
-    def draw_face(self, surf, r):
-        look = self.aim * (r * 0.14)
+        self.clamp_to_page()
+
+
+
+    # ------------------------------------------------------------------
+    def _arm_fire(self, arm, game):
+        target = game.player.pos
+        direction = norm(target - arm.tip())
+        speed = 300.0 + 45.0 * self.phase_n
+        game.add_drop(
+            Drop(
+                arm.tip(),
+                direction * speed,
+                5.2,
+                0.026,
+                False,
+                1.3,
+                color=C.VERM_DARK,
+                stains=True,
+            )
+        )
+        arm.recoil = 1.0
+        game.audio.play("shoot", 0.16)
+
+    def _sever(self, arm, game):
+        arm.alive = False
+        self.severed += 1
+        # Taking an arm buys calm: the patience ramp starts over.
+        self.since_sever = 0.0
+        # The head opens and stays open until the increment is paid.
+        self.armored = False
+        tip = arm.tip()
+        game.particles.burst(tip, 22, 260, 0.6, 3.4, C.VERM_DARK, C.VERM_PALE, 2.0)
+        game.add_puddle(tip, 18, 0.05, C.VERM_DARK)
+        game.ring(tip, 52, C.VERMILION, 0.35, 3)
+        game.audio.play("kill", 0.6)
+        game.burst_text(tip + Vector2(0, -14), "OPEN", C.GOLD, 20)
+        game.shake(6.0)
+
+    def _checkpoint(self, game):
+        """Reached the next eighth: armour up, pause, get angrier."""
+        self.armored = True
+        self.stagger = self.STAGGER
+        game.particles.burst(self.pos, 34, 300, 0.8, 4.2, C.INK, C.VERM_PALE, 1.8)
+        game.ring(self.pos, self.effective_radius * 3.4, C.VERMILION, 0.55, 4)
+        game.shake(11.0)
+        game.hitstop = max(game.hitstop, 0.07)
+        game.audio.play("boss", 0.8)
+        label = f"{round(self.phase_n * 100 / self.CHECKPOINTS)}%"
+        game.burst_text(self.pos + Vector2(0, -self.effective_radius - 20), label, C.VERMILION, 22)
+
+    # ------------------------------------------------------------------
+    def take_arm_hit(self, drop, game) -> bool:
+        """Called by the game when a player droplet is inside an arm's reach.
+
+        Only the tip zone takes damage. A shot anywhere else along the limb is
+        absorbed and does nothing at all, which is the whole point of the
+        zone: the player has to hit the far end while it moves. Returning True
+        in that case consumes the droplet, so a wasted shot is a real cost.
+
+        While the head is open the arms are inert, and shots pass through to
+        the head instead.
+        """
+        if self.dead or self.open:
+            return False
+        touch = (self.ARM_HIT_RADIUS + drop.radius) ** 2
+        for arm in self.arms:
+            if not arm.alive:
+                continue
+            pts = arm.points()
+            # Where along the limb did the droplet land? Nearest point on the
+            # drawn curve, so the hitbox cannot disagree with the artwork.
+            best = -1
+            best_d = touch
+            for i, q in enumerate(pts):
+                d = (q - drop.pos).length_squared()
+                if d <= best_d:
+                    best_d = d
+                    best = i
+            if best < 0:
+                continue
+            # Past the tip zone the limb is a decoy and does nothing. It does
+            # not swallow the droplet either: a shot travelling out toward a
+            # tip has to cross the limb to get there, so consuming it here
+            # made tips unreachable in practice and the boss unkillable. The
+            # droplet passes through untouched and may still hit the tip on a
+            # later frame.
+            if best < int(len(pts) * (1.0 - self.TIP_FRACTION)):
+                continue
+            arm.hp -= drop.damage
+            arm.hit_flash = 1.0
+            # A tip hit is a hard shot and pays for itself. The fight needs
+            # roughly ninety of them, and at the standard splat yield the ink
+            # economy could not fund that no matter how well the player drank,
+            # so the precision shot is worth more than an ordinary hit.
+            game.add_puddle(drop.pos, 11.0, self.TIP_INK, C.INK_MID)
+            if arm.hp <= 0:
+                self._sever(arm, game)
+            else:
+                game.particles.burst(drop.pos, 5, 130, 0.26, 2.0, C.VERM_DARK, C.VERM_PALE)
+            return True
+        return False
+
+    def update(self, dt: float, game) -> None:
+        """Move first, then clamp, so the clamp is never a frame stale."""
+        super().update(dt, game)
+        if not self.dead:
+            self.clamp_to_page()
+
+    def clamp_to_page(self) -> None:
+        """Keep the whole animal on the page and clear of the HUD.
+
+        The ink bar and the boss health bar occupy the bottom strip, so the
+        creature's skirt is measured against that band, not the window edge.
+        """
+        # Use the full reach on every side. Using a fraction of it on the top
+        # and bottom let the arms hang 24px past the page even while the clamp
+        # reported success, which is why the boss kept drawing off-screen.
+        pad_x = min(self.reach + 6.0, C.WIDTH * 0.45)
+        pad_y = min(self.reach + 6.0, C.HEIGHT * 0.45)
+        self.pos.x = clamp(self.pos.x, pad_x, C.WIDTH - pad_x)
+        self.pos.y = clamp(self.pos.y, pad_y, C.HEIGHT - pad_y)
+
+    def take_damage(self, amount, game, knockback=None, coat=0.5):
+        if self.dead:
+            return
+        if not self.open:
+            # Armoured. Still show the hit, so the rule is learnable without a
+            # tutorial line: sparks, no number.
+            self.hit_flash = 0.35
+            game.particles.burst(self.pos, 3, 120, 0.2, 1.6, C.PAPER, C.INK_PALE)
+            return
+        # An open head takes exactly one increment and no more. Damage is
+        # clipped to what is left of the current increment, so a shot that
+        # crosses the boundary cannot overkill into the next one.
+        #
+        # Without this the two ledgers disagreed: head_hp fell by every shot's
+        # full damage while phase_n advanced in whole steps, so the surplus
+        # from each crossing shot accumulated and the eighth arm was never
+        # needed. Clipping keeps them in lockstep, which is what makes each
+        # arm worth exactly one step.
+        step = self._step()
+        room = max(0.0, step - self.open_damage)
+        applied = min(amount, room)
+        self.open_damage += applied
+        self.head_hp = max(0.0, self.head_hp - applied)
+        self.hp = self.head_hp
+        self.hit_flash = 1.0
+        self.wince = 1.0
+        self.squash = Vector2(0.88, 1.14)
+
+        if self.open_damage >= step - 1e-9:
+            self.open_damage = 0.0
+            self.phase_n += 1
+            if self.phase_n >= self.CHECKPOINTS or self.head_hp <= 1e-9:
+                self.head_hp = 0.0
+                self.phase_n = min(self.CHECKPOINTS, self.phase_n)
+                self.die(game)
+                return
+            self._checkpoint(game)
+
+    # ------------------------------------------------------------------
+    def _arm_polygon(self, arm, width: float):
+        """A filled, tapered ribbon along the arm's curve.
+
+        Drawing the arm as a chain of lines leaves visible steps and a flat
+        silhouette, which is what made it look sloppy beside the rest of the
+        game. This builds an outline from the curve instead, so it can be
+        filled with the same anti-aliased polygon call everything else uses.
+        """
+        pts = arm.points()
+        left, right = [], []
+        for k, p in enumerate(pts):
+            t = k / max(1, len(pts) - 1)
+            if k == 0:
+                nxt = pts[1]
+                tangent = nxt - p
+            elif k == len(pts) - 1:
+                tangent = p - pts[k - 1]
+            else:
+                tangent = pts[k + 1] - pts[k - 1]
+            if tangent.length_squared() < 1e-6:
+                tangent = Vector2(1, 0)
+            n = Vector2(-tangent.y, tangent.x).normalize()
+            # thinnest at the tip, thickest at the root
+            # Full width at the root, tapering to a point at the tip.
+            w = width * (1.0 - 0.86 * t) * (0.55 + 0.45 * math.sin(min(1.0, t * 2.2) * math.pi * 0.5))
+            left.append(p + n * max(0.6, w))
+            right.append(p - n * max(0.6, w))
+        return left + right[::-1]
+
+    def draw(self, surf: pygame.Surface) -> None:
+        """Drawn the way everything else in the game is drawn.
+
+        Every other creature is one flat anti-aliased polygon in a muted
+        grey-violet, with white eyes and a mouth line. Nothing in this game has
+        a gradient, an outline, or a chevron pattern. The boss had all three
+        and read as clip art beside the blots, so this is deliberately plain:
+        flat tapered limbs, a flat mantle, and the same face construction the
+        other enemies use.
+        """
+        r = self.effective_radius
+        if r < 1:
+            return
+
+        # Darken toward ink as the fight is paid for, finishing at C.INK, the
+        # same colour every other corpse turns. A boss that died still
+        # grey-violet looked like it had not been damaged at all.
+        level = self.phase_n / max(1, self.CHECKPOINTS - 1)
+        progress = 1.0 - (self.head_hp / max(1e-6, self.head_max))
+        # progress alone is not enough: the last eighth is paid off in one hit,
+        # so the final frames would jump from 7/8 to full. Take the further of
+        # the two so the colour tracks whichever is ahead, and hold ink once
+        # the fight is over.
+        shade = max(level, progress)
+        if self.dead:
+            shade = 1.0
+        body = lerp_color(self.body, C.INK, min(1.0, 0.10 + 0.90 * shade))
+        if self.ink_coat > 0.03:
+            body = lerp_color(body, C.INK, min(1.0, self.ink_coat * 0.5))
+        if self.hit_flash > 0.02:
+            body = lerp_color(body, C.WHITE, self.hit_flash * 0.8)
+        if self.open:
+            # only the open state changes colour at all, and only slightly
+            body = lerp_color(body, C.VERM_PALE, 0.22)
+
+        # --- arms: one flat polygon each, nothing else ---
+        for arm in self.arms:
+            if not arm.alive:
+                continue
+            col = lerp_color(body, C.VERM_PALE, 0.35 * arm.hit_flash)
+            aa_polygon(surf, self._arm_polygon(arm, 15.0 - 3.0 * level), col)
+
+        # --- mantle: flat blob, same squash and point count as Enemy.draw ---
+        sx = 0.94 + 0.10 * math.sin(self.spin * 1.7)
+        sy = 1.06 - 0.10 * math.sin(self.spin * 1.7)
+        # Fewer lobes and a gentler phase than the small creatures use: at
+        # this size the wobble amplitude is large in pixels and cut visible
+        # notches where the arms meet the body.
+        pts = blob_points(
+            self.pos.x, self.pos.y, r, 4, self.spin * 0.55, 2.4, (sx, sy), 24
+        )
+        aa_polygon(surf, pts, body)
+
+        # --- face: identical construction to the other creatures ---
+        self.draw_face(surf, r)
+
+        # --- the one piece of state that must be legible: open or shut ---
+        if self.open:
+            pygame.draw.circle(
+                surf, C.VERM_PALE, (int(self.pos.x), int(self.pos.y)), int(r) + 4, 2
+            )
+
+    def draw_face(self, surf: pygame.Surface, r: float) -> None:
+        look = self.aim * (r * 0.22)
+        eye_r = max(1.6, r * 0.14)
         for side in (-1, 1):
-            ex = self.pos.x + look.x + side * r * 0.28
-            ey = self.pos.y + look.y - r * 0.12
-            pygame.draw.circle(surf, C.WHITE, (int(ex), int(ey)), max(2, int(r * 0.15)))
-            pygame.draw.circle(surf, C.INK_MID, (int(ex + side * 1), int(ey + 1)), max(1, int(r * 0.07)))
-        pts = []
-        for i in range(9):
-            t = i / 8
-            x = self.pos.x + (t - 0.5) * r * 0.95
-            y = self.pos.y + look.y + r * 0.34 + (r * 0.1 if i % 2 else -r * 0.02)
-            pts.append((int(x), int(y)))
-        pygame.draw.lines(surf, C.WHITE, False, pts, max(2, int(r * 0.05)))
+            ex = self.pos.x + look.x + side * r * 0.34
+            ey = self.pos.y + look.y - r * 0.1
+            pygame.draw.circle(surf, C.WHITE, (int(ex), int(ey)), max(1, int(eye_r + 0.9)))
+            pygame.draw.circle(
+                surf, C.INK, (int(ex + look.x * 0.3), int(ey + look.y * 0.3)),
+                max(1, int(eye_r * 0.55)),
+            )
+        # mouth: a short line, but wavering once it is damaged
+        my = self.pos.y + look.y + r * 0.42
+        wob = r * 0.06 * level if (level := self.phase_n / max(1, self.CHECKPOINTS - 1)) else 0.0
+        pygame.draw.line(
+            surf, C.INK,
+            (self.pos.x - r * 0.3, my),
+            (self.pos.x + r * 0.3, my + math.sin(self.spin * 3.0) * wob),
+            max(1, int(r * 0.09)),
+        )
+    def die(self, game):
+        if self.dead:
+            return
+        self.dead = True
+        game.particles.burst(self.pos, 90, 380, 1.0, 5.4, C.INK, C.VERM_PALE, 1.7)
+        game.add_puddle(self.pos, 80, 0.45)
+        game.spawn_orbs(self.pos, 0.4, 12)
+        game.shake(16.0)
+        game.on_kill(self)

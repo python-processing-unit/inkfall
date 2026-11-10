@@ -56,7 +56,7 @@ what you must, then immediately walk through the mess you made to reclaim it,
 and never leave a large puddle sitting near a wave spawn.
 
 Kills chained within 2.4 seconds build a combo multiplier, up to x3. Every fifth
-wave the boss, THE BLOT, surfaces.
+wave the boss, OCTOPUS, surfaces.
 
 ### The creatures
 
@@ -69,8 +69,34 @@ wave the boss, THE BLOT, surfaces.
   has a visible windup and cannot grab beyond the length of its drawn tendril,
   so stepping or dashing back during the tell escapes it. While latched it
   drains your mass.
-- **THE BLOT** is the boss on every fifth wave. It slams, bursts, and spawns
-  Skitters.
+- **OCTOPUS** is the boss on every fifth wave. It is eight arms and one head,
+  and the head is armoured. You cannot hurt the head at all until an arm goes.
+
+  Only the last fifth of an arm can be damaged. Anything that lands further up
+  the limb passes straight through and does nothing, so the arms are a moving
+  target rather than a wall: you have to catch the whip end while it sweeps.
+  The arms drift quickly and reach a long way, so the creature is fast enough
+  to lead away from a puddle you want, but it cannot catch you.
+
+  Sever an arm and the head opens, and it stays open until you land one
+  eighth of its health. That increment cannot be lost by being slow: small
+  shots accumulate on the head and the window closes on damage, not on a
+  timer. Paying it re-armours the head, pauses the arms, and makes the
+  creature fire faster. Eight arms and eight increments, so the last arm
+  ends the fight.
+
+  Arms never grow back. A severed limb is spent, which is why each one takes
+  several hits and why the head bank is the only thing you can spend.
+
+  It gets impatient. The longer you go without taking an arm, the faster the
+  surviving arms fire, from roughly two shots a second just after a sever up
+  toward four if you stall for a minute. Taking an arm calms it again, so the
+  pressure is about how long since your last success, not how long the fight
+  has run.
+
+  The body darkens toward ink as the fight is paid for, ending the same
+  colour every other corpse turns. It is drawn with the same flat fills,
+  muted palette, and face construction as everything else on the page.
 
 ## Music
 
@@ -115,7 +141,7 @@ semitone clash, that the parts stay in separate octaves, and how much of the
 music competes with each effect.
 
 Mode changes are driven by game state: calm on the title and the quiet moments,
-combat once more than a few enemies are alive, boss while THE BLOT is up, and
+combat once more than a few enemies are alive, boss while OCTOPUS is up, and
 calm again on the results screen. Switching cross-fades over 1.4 seconds on two
 mixer channels reserved ahead of the effect voices. `M` mutes the music along
 with the effects, and pausing the game pauses the loop in place.
@@ -150,6 +176,7 @@ uv run python tools/sweep.py          # seeded balance sweep over many runs
 uv run python tools/squid_check.py    # squid grab range vs drawn tendril
 uv run python tools/squid_impact.py   # isolate squid contribution to difficulty
 uv run python tools/music_check.py     # music modes, crossfade, pause, mute, channels
+uv run python tools/boss_duel.py       # OCTOPUS: does the fight actually close
 uv run python tools/music_audit.py     # grid alignment, harmony, and mix levels
 uv run python tools/profile_frame.py  # cProfile the crowded-board frame
 uv run python tools/startup.py        # real window and audio startup check
