@@ -159,11 +159,11 @@ class Game:
         self.boss_active = False
 
         if w % 5 == 0:
+            # No adds. The boss is a duel, and the fight is only legible if
+            # the player's attention is on its tell rather than on skitters.
             self.boss_active = True
             self.spawn_queue.append([0.7, "boss"])
             self.audio.play("boss", 0.9)
-            for i in range(2 + w // 5):
-                self.spawn_queue.append([2.6 + i * 0.55, "skitter"])
             return
 
         self.audio.play("wave", 0.5)
@@ -358,6 +358,29 @@ class Game:
             for e in self.enemies:
                 if e.dead:
                     continue
+                # OCTOPUS is hit on its arms, not its body: the head is
+                # armoured and its arms sit outside the body radius.
+                if hasattr(e, "take_arm_hit"):
+                    if e.take_arm_hit(d, self):
+                        # Stain, like every other hit in the game. Without
+                        # this the boss was the one target whose hits returned
+                        # no ink at all, so a fight needing ~90 shots drained
+                        # the player dry no matter how well they played.
+                        d.dead = True
+                        d.splat(self)
+                        break
+                    if (e.pos - d.pos).length_squared() < (e.effective_radius + d.radius) ** 2:
+                        e.take_damage(
+                            d.damage,
+                            self,
+                            (norm(d.vel) if d.vel.length_squared() > 1 else Vector2(0, -1))
+                            * (260 if d.heavy else 110),
+                            0.6 if d.heavy else 0.3,
+                        )
+                        d.dead = True
+                        d.splat(self)
+                        break
+                    continue
                 if (e.pos - d.pos).length_squared() < (e.effective_radius + d.radius) ** 2:
                     e.take_damage(
                         d.damage,
@@ -377,6 +400,13 @@ class Game:
                 if pl.hurt(d.damage, self, knock):
                     self.audio.play("hurt", 0.55)
                 d.dead = True
+                # The ink still lands. A shot that connects is not free: the
+                # boss spent ink to make it, and the splash is on the floor for
+                # either of them to reclaim. Without this a hit destroyed the
+                # ink entirely, so the boss could never refill and any blot
+                # that fires at you starves itself.
+                if d.stains:
+                    self.add_puddle(d.pos, d.radius * 1.5, 0.022, d.color)
                 self.particles.burst(d.pos, 6, 150, 0.3, 2.4, C.VERM_DARK, C.VERM_PALE)
 
     # ------------------------------------------------------------------
@@ -564,12 +594,12 @@ class Game:
             f = clamp(boss.hp / boss.max_hp, 0, 1)
             if f > 0:
                 pygame.draw.rect(surf, C.VERM_DARK, (bx, by, int(bw * f), 12), border_radius=6)
-            nm = self.font_small.render("THE BLOT", True, C.INK)
+            nm = self.font_small.render("OCTOPUS", True, C.INK)
             surf.blit(nm, (C.WIDTH / 2 - nm.get_width() / 2, by - 20))
 
         if self.wave_banner > 0:
             fade = clamp(self.wave_banner / 0.55, 0, 1)
-            txt = "THE BLOT SURFACES" if self.boss_active else f"WAVE {self.wave}"
+            txt = "OCTOPUS SURFACES" if self.boss_active else f"WAVE {self.wave}"
             img = self.font_big.render(txt, True, C.INK)
             img.set_alpha(int(215 * fade))
             surf.blit(img, (C.WIDTH / 2 - img.get_width() / 2, 150))
@@ -639,7 +669,7 @@ class Game:
             ("but so do they", "Blots touching your puddles swell up and hit harder."),
             ("keep moving", "Shift dashes with brief invulnerability. It costs ink."),
             ("combo", "Chain kills within a couple of seconds for a multiplier."),
-            ("waves", "Clear every blot. Every fifth wave, THE BLOT surfaces."),
+            ("waves", "Clear every blot. Every fifth wave, OCTOPUS surfaces."),
             ("know them", "Skitter: fast pack. Sponge: drinks. Quill: snipes."),
         ]
         head_x = left + 26
