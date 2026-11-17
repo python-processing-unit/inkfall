@@ -40,7 +40,7 @@ HIT_IFRAMES = 0.70
 # ---------------------------------------------------------------- world
 PUDDLE_DRY_TIME = 16.0
 ORB_MAGNET = 150.0
-COMBO_WINDOW = 2.4
+COMBO_WINDOW = 4.0
 MAX_PARTICLES = 900
 MAX_PUDDLES = 60
 

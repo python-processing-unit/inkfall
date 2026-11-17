@@ -55,7 +55,7 @@ further. Your ammunition feeds the enemy. The practical loop is to shoot only
 what you must, then immediately walk through the mess you made to reclaim it,
 and never leave a large puddle sitting near a wave spawn.
 
-Kills chained within 2.4 seconds build a combo multiplier, up to x3. Every fifth
+Kills chained within 4.0 seconds build a combo multiplier, up to x3. Every fifth
 wave the boss, OCTOPUS, surfaces.
 
 ### The creatures
